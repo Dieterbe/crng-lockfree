@@ -50,6 +50,9 @@ func (t *table) Consume(start, end uint64, callback func(m metric)) {
 	for pos < end {
 		segmentPos := pos / 65536
 		metric := segments[segmentPos].metrics[pos%65536]
+		if metric == metricEndMarker {
+			return
+		}
 		callback(metric)
 		pos++
 	}

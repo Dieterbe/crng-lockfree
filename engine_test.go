@@ -1,81 +1,93 @@
 package router
 
 import (
-	"math/rand"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestAdd0(t *testing.T) {
-	testAdd(t, 0)
-}
-func TestAdd1(t *testing.T) {
-	testAdd(t, 1)
-}
-func TestAdd5(t *testing.T) {
-	testAdd(t, 5)
-}
-func TestAdd127(t *testing.T) {
-	testAdd(t, 127)
-}
-func TestAdd128(t *testing.T) {
-	testAdd(t, 128)
-}
-func TestAdd250(t *testing.T) {
-	testAdd(t, 250)
-}
-func TestAdd260(t *testing.T) {
-	testAdd(t, 260)
-}
-func TestAdd60k(t *testing.T) {
-	testAdd(t, 60000)
-}
-func TestAdd64kminus2(t *testing.T) {
-	testAdd(t, 65534)
-}
-func TestAdd64kminus1(t *testing.T) {
-	testAdd(t, 65534)
-}
-func TestAdd64(t *testing.T) {
-	testAdd(t, 65536)
-}
-func TestAdd64plus1(t *testing.T) {
-	testAdd(t, 65537)
-}
-func TestAdd256k(t *testing.T) {
-	testAdd(t, 4*65535)
-}
+func TestAddAndCompare(t *testing.T) {
+	tableBatchSizes := []int{1, 2, 3, 4, 128, 1024}
+	insertBatchSizes := []int{2, 3, 7, 8, 50, 100, 500, 1000, 5000, 10000, 20000}
+	numMetricss := []int{0, 1, 2, 3, 31, 127, 128, 129, 4094, 4095, 4096, 4097, 4098, 65534, 65535, 65536, 65537, (2 * 65536) - 1, 2 * 65536, (2 * 65536) + 2}
+	for _, numMetrics := range numMetricss {
+		for _, insertBatchSize := range insertBatchSizes {
+			for _, tableBatchSize := range tableBatchSizes {
+				name := fmt.Sprintf("numMetrics %d insertBatchSize %d tableBatchSize %d", numMetrics, insertBatchSize, tableBatchSize)
+				t.Run(name, func(t *testing.T) {
+					table := NewTable(tableBatchSize)
+					metrics := make([]metric, 0, numMetrics)
+					for i := 0; i < numMetrics; i++ {
+						metrics = append(metrics, metric{
+							Key: uint32(i),
+							Ts:  uint32(i),
+						})
+					}
+					// the table may mangle our input if it's buggy, so to check the result
+					// we need a safe copy that no one can tamper with
+					want := make([]metric, numMetrics)
+					copy(want, metrics)
 
-// TODO do our inserts in batches of varying sizes?
-// and in variying segment batch sizes.
-// we then don't need all these hardcoded variants anymore either
-
-func testAdd(t *testing.T, num int) {
-	table := NewTable(4)
-	metrics := make([]metric, 0, num)
-	for i := 0; i < num; i++ {
-		metrics = append(metrics, metric{
-			Key: uint32(i),
-			Ts:  uint32(i),
-			Val: rand.Float64(),
-		})
-	}
-	// the table may mangle our input if it's buggy, so to check the result
-	// we need a safe copy that no one can tamper with
-	want := make([]metric, num)
-	copy(want, metrics)
-	table.Add(metrics)
-	got := make([]metric, 0, num)
-	cb := func(m metric) {
-		got = append(got, m)
-	}
-	table.Consume(0, uint64(num), cb)
-
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("testAdd() mismatch (-want +got):\n%s", diff)
+					// split up the input in batches
+					var i, j int
+					for j < len(metrics) {
+						j = i + insertBatchSize
+						if j > len(metrics) {
+							j = len(metrics)
+						}
+						batch := metrics[i:j]
+						table.Add(batch)
+						i = j
+					}
+					got := make([]metric, 0, numMetrics)
+					cb := func(m metric) {
+						got = append(got, m)
+					}
+					table.Consume(0, uint64(numMetrics), cb)
+					if diff := cmp.Diff(want, got); diff != "" {
+						t.Errorf("testAdd() mismatch (-want +got):\n%s", diff)
+					}
+				})
+			}
+		}
 	}
 }
 
-func BenchmarkRouting(b *testing.B) {
+// right now, seems more costly to have table batc > insert batch, probably because of all the remainder filling
+//
+func BenchmarkAdd(b *testing.B) {
+	tableBatchSizes := []int{32, 64, 128, 512, 1024}
+	insertBatchSizes := []int{100, 500, 1000, 5000}
+	for _, insertBatchSize := range insertBatchSizes {
+		for _, tableBatchSize := range tableBatchSizes {
+			name := fmt.Sprintf("insertBatchSize %d tableBatchSize %d", insertBatchSize, tableBatchSize)
+			b.Run(name, func(b *testing.B) {
+				a := time.Now()
+				table := NewTable(tableBatchSize)
+				metrics := make([]metric, 0, b.N)
+				for i := 0; i < b.N; i++ {
+					metrics = append(metrics, metric{
+						Key: uint32(i),
+						Ts:  uint32(i),
+					})
+				}
+				b.ResetTimer()
+				// split up the input in batches
+				var i, j int
+				for j < len(metrics) {
+					j = i + insertBatchSize
+					if j > len(metrics) {
+						j = len(metrics)
+					}
+					batch := metrics[i:j]
+					table.Add(batch)
+					i = j
+				}
+				dur := time.Since(a)
+				b.ReportMetric(float64(1e9*int64(b.N)/dur.Nanoseconds()), "metrics/s")
+			})
+		}
+	}
 }
